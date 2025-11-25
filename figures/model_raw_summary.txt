@@ -1,0 +1,25 @@
+
+Call:
+lm(formula = formula_raw, data = spotify)
+
+Residuals:
+       Min         1Q     Median         3Q        Max 
+-2.321e+09 -1.759e+08 -7.213e+07  9.918e+07  1.540e+09 
+
+Coefficients:
+                              Estimate Std. Error t value Pr(>|t|)    
+(Intercept)                 -1.153e+10  2.283e+09  -5.048 5.35e-07 ***
+in_spotify_playlists         5.960e+04  1.544e+03  38.601  < 2e-16 ***
+danceability_pct            -1.870e+06  2.695e+06  -0.694   0.4879    
+energy_pct                  -3.060e+06  2.728e+06  -1.122   0.2623    
+valence_pct                  5.201e+05  5.544e+05   0.938   0.3485    
+artist_count                -3.253e+07  1.281e+07  -2.539   0.0113 *  
+released_year                5.951e+06  1.135e+06   5.243 1.95e-07 ***
+danceability_pct:energy_pct  1.538e+04  4.233e+04   0.363   0.7165    
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+Residual standard error: 341600000 on 944 degrees of freedom
+Multiple R-squared:  0.6395,	Adjusted R-squared:  0.6369 
+F-statistic: 239.3 on 7 and 944 DF,  p-value: < 2.2e-16
+
