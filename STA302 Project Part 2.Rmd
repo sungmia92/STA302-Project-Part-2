@@ -6,10 +6,13 @@ date: "2025-11-25"
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-# ------------------ 0) Load libraries ------------------
-pkgs <- c("tidyverse", "broom", "car", "MASS", "lmtest", "sandwich", "caret", "Metrics", "ggplot2")
-invisible(lapply(pkgs, function(p) if(!requireNamespace(p, quietly = TRUE)) install.packages(p)))
-library(tidyverse); library(broom); library(car); library(MASS); library(lmtest); library(sandwich); library(caret); library(Metrics); library(ggplot2)
+# ------------------ 1) Load libraries ------------------
+library(tidyverse)
+library(broom)
+library(car)
+library(MASS)
+library(ggplot2)
+library(leaps)
 ```
 
 ## R Markdown
@@ -19,10 +22,12 @@ This is an R Markdown document. Markdown is a simple formatting syntax for autho
 When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
 
 ```{r cars}
-# ------------------ 1) Load data ------------------
+# ------------------ 2) Load and clean data ------------------
 spotify <- read_csv("spotify-2023.csv")
 
-# ------------------ 2) Clean / rename columns ------------------
+predictors <- c("in_spotify_playlists", "danceability_pct", "energy_pct",
+                "valence_pct", "artist_count", "released_year")
+
 spotify <- spotify %>%
   rename_with(~ gsub("%", "pct", .x, fixed = TRUE)) %>%
   rename_with(~ make.names(.x)) %>%
@@ -35,342 +40,217 @@ spotify <- spotify %>%
     artist_count = as.integer(artist_count),
     released_year = as.integer(released_year)
   ) %>%
-  drop_na(streams, in_spotify_playlists, danceability_pct, energy_pct, valence_pct, artist_count, released_year)
+  drop_na(all_of(c("streams", predictors))) %>%
+  mutate(log_streams = log1p(streams))
 
-# ------------------ 3) Fit raw model ------------------
-model_raw <- lm(streams ~ in_spotify_playlists + danceability_pct + energy_pct +
-                  valence_pct + artist_count + released_year +
-                  danceability_pct * energy_pct,
-                data = spotify)
-summary(model_raw)
-
-# ------------------ 4) Fit log-transformed model (heteroskedasticity fix) ------------------
-spotify <- spotify %>% mutate(log_streams = log1p(streams))
-model_log <- lm(log_streams ~ in_spotify_playlists + danceability_pct + energy_pct +
-                  valence_pct + artist_count + released_year +
-                  danceability_pct * energy_pct,
-                data = spotify)
-summary(model_log)
-
-# ------------------ 5) Optionally add quadratic term to improve linearity ------------------
-model_quad <- lm(log_streams ~ in_spotify_playlists + I(in_spotify_playlists^2) +
-                   danceability_pct + I(danceability_pct^2) +
-                   energy_pct + I(energy_pct^2) +
-                   valence_pct + artist_count + released_year +
-                   danceability_pct * energy_pct,
-                 data = spotify)
-summary(model_quad)
-
-# ------------------ 6) Residual diagnostics ------------------
-resid_before <- augment(model_raw)
-resid_after <- augment(model_log)
-
-# Residual vs Fitted (Raw)
-p_resid_raw <- ggplot(resid_before, aes(x = .fitted, y = .resid)) +
-  geom_point(alpha = 0.5) +
-  geom_hline(yintercept = 0, linetype = 2) +
-  labs(title = "Residuals vs Fitted (Raw Model)", x = "Fitted values", y = "Residuals") +
-  theme_minimal()
-ggsave("figures/resid_vs_fitted_raw.png", p_resid_raw, width = 6, height = 4, dpi = 300)
-
-# Residual vs Fitted (Log)
-p_resid_log <- ggplot(resid_after, aes(x = .fitted, y = .resid)) +
-  geom_point(alpha = 0.5) +
-  geom_hline(yintercept = 0, linetype = 2) +
-  labs(title = "Residuals vs Fitted (Log-Transformed Model)", x = "Fitted values", y = "Residuals") +
-  theme_minimal()
-ggsave("figures/resid_vs_fitted_log.png", p_resid_log, width = 6, height = 4, dpi = 300)
-
-# QQ Plots
-p_qq_raw <- ggplot(resid_before, aes(sample = .resid)) +
-  stat_qq() + stat_qq_line() +
-  labs(title = "QQ Plot of Residuals (Raw Model)") +
-  theme_minimal()
-ggsave("figures/qq_resid_raw.png", p_qq_raw, width = 6, height = 4, dpi = 300)
-
-p_qq_log <- ggplot(resid_after, aes(sample = .resid)) +
-  stat_qq() + stat_qq_line() +
-  labs(title = "QQ Plot of Residuals (Log-Transformed Model)") +
-  theme_minimal()
-ggsave("figures/qq_resid_log.png", p_qq_log, width = 6, height = 4, dpi = 300)
-
-# Scale-Location plots
-p_scale_raw <- ggplot(resid_before, aes(x = .fitted, y = sqrt(abs(.resid)))) +
-  geom_point(alpha = 0.5) +
-  geom_smooth(method = "loess", se = FALSE) +
-  labs(title = "Scale-Location (Raw Model)", x = "Fitted values", y = "Sqrt(|Residuals|)") +
-  theme_minimal()
-ggsave("figures/scale_location_raw.png", p_scale_raw, width = 6, height = 4, dpi = 300)
-
-p_scale_log <- ggplot(resid_after, aes(x = .fitted, y = sqrt(abs(.resid)))) +
-  geom_point(alpha = 0.5) +
-  geom_smooth(method = "loess", se = FALSE) +
-  labs(title = "Scale-Location (Log Model)", x = "Fitted values", y = "Sqrt(|Residuals|)") +
-  theme_minimal()
-ggsave("figures/scale_location_log.png", p_scale_log, width = 6, height = 4, dpi = 300)
-
-# ------------------ 7) Optional: Box-Cox ------------------
-if(all(spotify$streams > 0)) {
-  bc <- boxcox(model_raw, lambda = seq(-1, 2, 0.05), plotit = FALSE)
-  lambda_opt <- bc$x[which.max(bc$y)]
-  cat("Box-Cox suggested lambda =", lambda_opt, "\n")
+# ------------------ 3) Helper function: residual diagnostics ------------------
+plot_residuals <- function(model, model_name, data, predictors=NULL) {
+  resid_dat <- augment(model)
+  
+  # Add predictors
+  if(!is.null(predictors)){
+    preds_existing <- predictors[predictors %in% colnames(data)]
+    resid_dat <- bind_cols(resid_dat, data[, preds_existing])
+  }
+  
+  n <- nrow(resid_dat)
+  p <- length(coef(model)) - 1
+  resid_dat <- resid_dat %>%
+    mutate(
+      std_resid = rstandard(model),
+      leverage = hatvalues(model),
+      cooks_d = cooks.distance(model),
+      outlier = abs(std_resid) > 4,
+      high_leverage = leverage > 2*(p+1)/n,
+      influential = cooks_d > qf(0.5, p+1, n-p-1),
+      problematic = outlier | high_leverage | influential
+    )
+  
+  # Residuals vs Fitted
+  p1 <- ggplot(resid_dat, aes(x = .fitted, y = .resid)) +
+    geom_point(aes(color = problematic), alpha = 0.5) +
+    geom_hline(yintercept = 0, linetype=2) +
+    labs(title=paste("Residuals vs Fitted:", model_name), x="Fitted", y="Residuals") +
+    theme_minimal() +
+    scale_color_manual(values=c("black","red"))
+  
+  # Histogram
+  p2 <- ggplot(resid_dat, aes(x = std_resid)) +
+    geom_histogram(bins=50, fill="skyblue", color="black", alpha=0.7) +
+    labs(title=paste("Histogram Std Residuals:", model_name), x="Std Residuals", y="Count") +
+    theme_minimal()
+  
+  # QQ plot
+  p3 <- ggplot(resid_dat, aes(sample = .resid)) + stat_qq() + stat_qq_line() +
+    labs(title=paste("QQ Plot:", model_name)) + theme_minimal()
+  
+  # Scale-location
+  p4 <- ggplot(resid_dat, aes(x = .fitted, y = sqrt(abs(.resid)))) +
+    geom_point(aes(color=problematic), alpha=0.5) +
+    geom_smooth(method="loess", se=FALSE) +
+    labs(title=paste("Scale-Location:", model_name), x="Fitted", y="Sqrt(|Residuals|)") +
+    theme_minimal() +
+    scale_color_manual(values=c("black","red"))
+  
+  # Optional: Residuals vs predictors
+  if(!is.null(predictors)){
+    for(pred in predictors){
+      if(pred %in% colnames(resid_dat)){
+        p_pred <- ggplot(resid_dat, aes_string(x=pred, y=".resid")) +
+          geom_point(aes(color=problematic), alpha=0.5) +
+          geom_smooth(method="loess", se=FALSE) +
+          labs(title=paste("Residuals vs", pred, ":", model_name), x=pred, y="Residuals") +
+          theme_minimal() +
+          scale_color_manual(values=c("black","red"))
+      }
+    }
+  }
+  
+  return(resid_dat)
 }
 
-# ------------------ 8) Interaction plot ------------------
-dance_seq <- seq(min(spotify$danceability_pct), max(spotify$danceability_pct), length.out = 100)
-energy_quants <- quantile(spotify$energy_pct, c(0.25, 0.5, 0.75))
-newdata <- expand.grid(
-  in_spotify_playlists = median(spotify$in_spotify_playlists),
-  danceability_pct = dance_seq,
-  energy_pct = energy_quants,
-  valence_pct = median(spotify$valence_pct),
-  artist_count = round(median(spotify$artist_count)),
-  released_year = round(median(spotify$released_year))
-)
-newdata$pred <- predict(model_log, newdata = newdata)
-newdata <- newdata %>%
-  mutate(energy_level = factor(case_when(
-    energy_pct == energy_quants[1] ~ "Low (25th pctile)",
-    energy_pct == energy_quants[2] ~ "Median (50th pctile)",
-    energy_pct == energy_quants[3] ~ "High (75th pctile)"
-  ), levels = c("Low (25th pctile)", "Median (50th pctile)", "High (75th pctile)")))
+# ------------------ 4) Step 1: Raw Y ------------------
+model_raw <- lm(streams ~ in_spotify_playlists + danceability_pct + energy_pct +
+                  valence_pct + artist_count + released_year +
+                  danceability_pct*energy_pct, data=spotify)
+resid_raw <- plot_residuals(model_raw, "raw", spotify, predictors)
 
-p_interaction <- ggplot(newdata, aes(x = danceability_pct, y = expm1(pred), color = energy_level)) +
-  geom_line(size = 1) +
-  labs(title = "Interaction: Predicted Streams by Danceability across Energy Levels",
-       x = "Danceability (%)", y = "Predicted Streams", color = "Energy Level") +
-  theme_minimal()
-ggsave("figures/interaction_pred_streams_log_backtrans.png", p_interaction, width = 7, height = 4, dpi = 300)
+# ------------------ 5) Step 2: Log Y ------------------
+model_log <- lm(log_streams ~ in_spotify_playlists + danceability_pct + energy_pct +
+                  valence_pct + artist_count + released_year +
+                  danceability_pct*energy_pct, data=spotify)
+resid_log <- plot_residuals(model_log, "logy", spotify, predictors)
 
-## Including Plots
+# ------------------ 6) Step 3: Box-Cox on X ------------------
+# Safe base-R selection
+predictors_existing <- predictors[predictors %in% colnames(spotify)]
+x_candidates <- spotify[, predictors_existing] %>%
+  mutate_all(~ifelse(. <= 0, NA, .)) %>% drop_na()
 
-You can also embed plots, for example:
+# PowerTransform
+bc_x <- tryCatch(powerTransform(as.matrix(x_candidates)), error=function(e) e)
+if(!inherits(bc_x,"error")) summary(bc_x)
 
-```{r pressure, echo=FALSE}
-# ------------------ 7) Figure A: Histograms / density plots for streams, danceability_pct, energy_pct ------------------
-# A1: Streams histogram + density
-p_streams <- ggplot(spotify, aes(x = streams)) +
-  geom_histogram(bins = 60, alpha = 0.8) +
-  labs(title = "Histogram of Spotify Streams", x = "Streams", y = "Count") +
-  theme_minimal()
-ggsave("figures/hist_streams.png", p_streams, width = 6, height = 4, dpi = 300)
+# Apply transformations
+spotify <- spotify %>%
+  mutate(
+    log_in_spotify_playlists = log1p(in_spotify_playlists),
+    log_danceability_pct = log1p(danceability_pct),
+    log_energy_pct = log1p(energy_pct),
+    sqrt_valence_pct = sqrt(valence_pct),
+    inv_artist_count = 1/artist_count,
+    log_released_year = log(released_year),
+    log_interaction = log1p(danceability_pct*energy_pct)
+  )
 
-# A2: Streams (log) histogram — often more informative
-p_log_streams <- ggplot(spotify, aes(x = log1p(streams))) +
-  geom_histogram(bins = 60, alpha = 0.8) +
-  labs(title = "Histogram of log(1 + Streams)", x = "log(1 + Streams)", y = "Count") +
-  theme_minimal()
-ggsave("figures/hist_log_streams.png", p_log_streams, width = 6, height = 4, dpi = 300)
+# ------------------ 7) Step 4: Log Y + X-transform ------------------
+model_logx <- lm(log_streams ~ log_in_spotify_playlists + log_danceability_pct + log_energy_pct +
+                   sqrt_valence_pct + inv_artist_count + log_released_year + log_interaction,
+                 data=spotify)
+resid_logx <- plot_residuals(model_logx, "logy_xtrans", spotify, predictors)
 
-# A3: Danceability density/hist
-p_dance <- ggplot(spotify, aes(x = danceability_pct)) +
-  geom_density() +
-  geom_rug(alpha = 0.2) +
-  labs(title = "Density of Danceability (%)", x = "Danceability (%)") +
-  theme_minimal()
-ggsave("figures/density_danceability.png", p_dance, width = 5, height = 3.5, dpi = 300)
+# ------------------ 8) Step 5: Quadratic ------------------
+model_quad <- lm(log_streams ~ (log_in_spotify_playlists + log_danceability_pct + log_energy_pct +
+                                  sqrt_valence_pct + inv_artist_count + log_released_year + log_interaction)^2,
+                 data=spotify)
+resid_quad <- plot_residuals(model_quad, "quad", spotify, predictors)
 
-# A4: Energy density/hist
-p_energy <- ggplot(spotify, aes(x = energy_pct)) +
-  geom_density() +
-  geom_rug(alpha = 0.2) +
-  labs(title = "Density of Energy (%)", x = "Energy (%)") +
-  theme_minimal()
-ggsave("figures/density_energy.png", p_energy, width = 5, height = 3.5, dpi = 300)
+# ------------------ 9) Problematic points ------------------
+problematic_summary <- resid_quad %>%
+  summarize(
+    n_outliers = sum(outlier),
+    n_high_leverage = sum(high_leverage),
+    n_influential = sum(influential)
+  )
+print(problematic_summary)
 
-# ------------------ 8) Figure B: Clean coefficient table plot (dot-and-whisker) ------------------
-# Use broom::tidy to make a plot of estimates with 95% CIs
-coefs_plot_dat <- broom::tidy(model_raw) %>%
+# ------------------ 10) Model selection ------------------
+full_formula <- as.formula(log_streams ~ log_in_spotify_playlists + log_danceability_pct + log_energy_pct +
+                             sqrt_valence_pct + inv_artist_count + log_released_year + log_interaction)
+subset_model <- regsubsets(full_formula, data=spotify, nvmax=7, nbest=1, method="exhaustive")
+subset_summary <- summary(subset_model)
+best_adjR2 <- data.frame(
+  size = 1:length(subset_summary$which[,1]),
+  adjR2 = subset_summary$adjr2,
+  which_vars = apply(subset_summary$which, 1, function(x) paste(names(x)[x][-1], collapse=", "))
+) %>% arrange(desc(adjR2))
+print(best_adjR2)
+
+# Stepwise
+full_model <- lm(full_formula, data=spotify)
+intercept_model <- lm(log_streams ~ 1, data=spotify)
+model_stepwise <- stepAIC(intercept_model,
+                           scope=list(lower=intercept_model, upper=full_model),
+                           direction="both", trace=FALSE)
+
+# ------------------ 11) Train/test split ------------------
+set.seed(123)
+train_idx <- sample(seq_len(nrow(spotify)), size = floor(0.7*nrow(spotify)))
+spotify_train <- spotify[train_idx, ]
+spotify_test <- spotify[-train_idx, ]
+
+preferred_train <- lm(formula(model_stepwise), data=spotify_train)
+resid_train <- plot_residuals(preferred_train, "train", spotify_train, predictors)
+
+preferred_test <- lm(formula(model_stepwise), data=spotify_test)
+resid_test <- plot_residuals(preferred_test, "test", spotify_test, predictors)
+
+# ------------------ 12) Training/Test comparison ------------------
+adj_r2_train <- summary(preferred_train)$adj.r.squared
+adj_r2_test <- summary(preferred_test)$adj.r.squared
+
+coef_train <- coef(summary(preferred_train))
+coef_test <- coef(summary(preferred_test))
+coef_compare <- cbind(
+  estimate_train = coef_train[, "Estimate"],
+  se_train = coef_train[, "Std. Error"],
+  estimate_test = coef_test[, "Estimate"],
+  se_test = coef_test[, "Std. Error"]
+) %>% as.data.frame() %>% mutate(within_2SE = abs(estimate_train - estimate_test) <= 2*se_train)
+print(coef_compare)
+
+# MSE
+mse_train <- mean(residuals(preferred_train)^2)
+mse_test <- mean(residuals(preferred_test)^2)
+cat("MSE Train:", mse_train, "MSE Test:", mse_test, "\n")
+
+# LOOCV
+X_train <- model.matrix(preferred_train)
+y_train <- spotify_train$log_streams
+hat_train <- hatvalues(preferred_train)
+y_hat <- fitted(preferred_train)
+loocv_mse <- mean((y_train - y_hat/(1-hat_train))^2)
+cat("LOOCV MSE (train):", loocv_mse, "\n")
+
+# ------------------ 13) Coefficient table for preferred model ------------------
+library(broom)
+
+coef_table <- tidy(preferred_train) %>%
+  mutate(
+    estimate = round(estimate, 3),
+    std.error = round(std.error, 3),
+    statistic = round(statistic, 3),
+    p.value = signif(p.value, 3)
+  ) %>%
+  select(term, estimate, std.error, statistic, p.value)
+
+print(coef_table)
+
+# Optionally save to CSV
+write_csv(coef_table, "figures/coef_table_preferred_model.csv")
+
+# Optional: coefficient plot (dot-and-whisker style)
+coef_plot <- coef_table %>%
   filter(term != "(Intercept)") %>%
-  mutate(term = fct_reorder(term, estimate))
-
-p_coefs <- ggplot(coefs_plot_dat, aes(x = estimate, y = term)) +
+  mutate(term = fct_reorder(term, estimate)) %>%
+  ggplot(aes(x = estimate, y = term)) +
   geom_point() +
-  geom_errorbarh(aes(xmin = estimate - 1.96*std.error, xmax = estimate + 1.96*std.error), height = 0.2) +
-  labs(title = "Coefficient Estimates (raw streams model)", x = "Estimate", y = "") +
+  geom_errorbarh(aes(xmin = estimate - 1.96*std.error,
+                     xmax = estimate + 1.96*std.error), height = 0.2) +
+  labs(title = "Coefficient Estimates with 95% CI", x = "Estimate", y = "") +
   theme_minimal()
-ggsave("figures/coef_estimates_raw.png", p_coefs, width = 7, height = 4, dpi = 300)
 
-# Also export a neat table for the poster (rounded)
-coefs_table <- broom::tidy(model_raw) %>%
-  mutate(estimate = round(estimate, 0),
-         std.error = round(std.error, 0),
-         p.value = signif(p.value, 3)) %>%
-  select(term, estimate, std.error, p.value)
-write_csv(coefs_table, "figures/coef_table_raw.csv")
-
-# ------------------ 9) Figure C: Interaction plot (predicted streams across danceability at low/med/high energy) ------------------
-# Create grid of danceability_pct and energy_pct values
-dance_seq <- seq(min(spotify$danceability_pct, na.rm = TRUE),
-                 max(spotify$danceability_pct, na.rm = TRUE), length.out = 100)
-energy_low <- quantile(spotify$energy_pct, 0.25, na.rm = TRUE)
-energy_med <- quantile(spotify$energy_pct, 0.5, na.rm = TRUE)
-energy_high <- quantile(spotify$energy_pct, 0.75, na.rm = TRUE)
-
-newdata <- expand.grid(
-  in_spotify_playlists = median(spotify$in_spotify_playlists, na.rm = TRUE),
-  danceability_pct = dance_seq,
-  energy_pct = c(energy_low, energy_med, energy_high),
-  valence_pct = median(spotify$valence_pct, na.rm = TRUE),
-  artist_count = round(median(spotify$artist_count, na.rm = TRUE)),
-  released_year = round(median(spotify$released_year, na.rm = TRUE))
-)
-
-# Predict using the raw model (on original scale)
-newdata$pred_streams <- predict(model_raw, newdata = newdata, interval = "confidence")[, "fit"]
-# Bind energy level labels
-newdata <- newdata %>%
-  mutate(energy_level = case_when(
-    energy_pct == energy_low ~ "Low energy (25th pctile)",
-    energy_pct == energy_med ~ "Median energy (50th pctile)",
-    energy_pct == energy_high ~ "High energy (75th pctile)"
-  ))
-
-p_interaction <- ggplot(newdata, aes(x = danceability_pct, y = pred_streams, color = energy_level)) +
-  geom_line(size = 1) +
-  labs(title = "Interaction: Predicted Streams by Danceability across Energy Levels",
-       x = "Danceability (%)", y = "Predicted Streams", color = "Energy level") +
-  theme_minimal()
-ggsave("figures/interaction_pred_streams_raw.png", p_interaction, width = 7, height = 4, dpi = 300)
-
-# If you'd prefer the interaction plot on log-scale predictions (often clearer):
-newdata$pred_log <- predict(model_log, newdata = newdata, interval = "confidence")[, "fit"]
-p_interaction_log <- ggplot(newdata, aes(x = danceability_pct, y = expm1(pred_log), color = energy_level)) +
-  geom_line(size = 1) +
-  labs(title = "Interaction (log-model back-transformed): Predicted Streams by Danceability",
-       x = "Danceability (%)", y = "Predicted Streams (back-transformed)") +
-  theme_minimal()
-ggsave("figures/interaction_pred_streams_log_backtrans.png", p_interaction_log, width = 7, height = 4, dpi = 300)
-
-# ------------------ 10) Figure D: Residual diagnostics ------------------
-# Residual vs Fitted Plot — BEFORE Fix
-resid_dat <- augment(model_raw)
-p_resid_fitted <- ggplot(resid_dat, aes(x = .fitted, y = .resid)) +
-  geom_point(alpha = 0.5) +
-  geom_hline(yintercept = 0, linetype = 2) +
-  labs(title = "Residuals vs Fitted (raw model)", x = "Fitted values", y = "Residuals") +
-  theme_minimal()
-ggsave("figures/resid_vs_fitted_raw.png", p_resid_fitted, width = 6, height = 4, dpi = 300)
-
-# Residual vs Fitted Plot - TRY LOG ON Y
-lnStreams <- log(spotify$streams)
-model2 <- lm(lnStreams ~ in_spotify_playlists + danceability_pct + energy_pct +
-           valence_pct + artist_count + released_year +
-           danceability_pct * energy_pct,
-         data = spotify)
-e_hat <- resid(model2)
-y_hat <- fitted(model2)
-p_resid_fitted <- ggplot(spotify, aes(x = e_hat, y = y_hat)) +
-  geom_point(alpha = 0.5) +
-  geom_hline(yintercept = 0, linetype = 2) +
-  labs(title = "Residuals vs Fitted (transformed model)", x = "Fitted values", y = "Residuals") +
-  theme_minimal()
-ggsave("figures/resid_vs_fitted_transformed.png", p_resid_fitted, width = 6, height = 4, dpi = 300)
-
-# Residual vs Fitted Plot - BOX-COX ON Y
-powerTransform(model1)
-transStreams <- (spotify$streams)^0.2
-model3 <- lm(transStreams ~ in_spotify_playlists + danceability_pct + energy_pct +
-           valence_pct + artist_count + released_year +
-           danceability_pct * energy_pct,
-         data = spotify)
-e_hat <- resid(model3)
-y_hat <- fitted(model3)
-p_resid_fitted <- ggplot(spotify, aes(x = e_hat, y = y_hat)) +
-  geom_point(alpha = 0.5) +
-  geom_hline(yintercept = 0, linetype = 2) +
-  labs(title = "Residuals vs Fitted (transformed model)", x = "Fitted values", y = "Residuals") +
-  theme_minimal()
-ggsave("figures/resid_vs_fitted_transformed.png", p_resid_fitted, width = 6, height = 4, dpi = 300)
-
-# Residual vs Fitted Plot - BOX-COX ON X
-p <- powerTransform(cbind(resid_dat[,2:6]))
-summary(p)
-model4 <- lm(streams ~ log(in_spotify_playlists) + log(danceability_pct) + log(energy_pct) +
-           sqrt(valence_pct) + 1/artist_count + log(released_year) +
-           log(danceability_pct * energy_pct),
-         data = spotify)
-e_hat <- resid(model4)
-y_hat <- fitted(model4)
-plot(e_hat ~ y_hat, xlab="Fitted Values", ylab="Residuals")
-plot(e_hat ~ log(spotify$in_spotify_playlists), xlab="ln(in_spotify_playlists)", ylab="Residuals")
-plot(e_hat ~ log(spotify$danceability_pct), xlab="ln(AdPages)", ylab="Residuals")
-plot(e_hat ~ log(spotify$energy_pct), xlab="ln(SubRevenue)", ylab="Residuals")
-plot(e_hat ~ sqrt(spotify$valence_pct), xlab="ln(NewsRevenue)", ylab="Residuals")
-plot(e_hat ~ 1/(spotify$artist_count), xlab="ln(NewsRevenue)", ylab="Residuals")
-plot(e_hat ~ log(spotify$released_year), xlab="ln(SubRevenue)", ylab="Residuals")
-plot(e_hat ~ log(spotify$danceability_pct * spotify$energy_pct), xlab="ln(SubRevenue)", ylab="Residuals")
-qqnorm(e_hat); qqline(e_hat)
-
-p <- powerTransform(cbind(resid_dat[,1:6]))
-summary(p)
-model5 <- lm(transStreams ~ log(in_spotify_playlists) + log(danceability_pct) + log(energy_pct) +
-           sqrt(valence_pct) + 1/artist_count + log(released_year) +
-           log(danceability_pct * energy_pct),
-         data = spotify)
-e_hat <- resid(model5)
-y_hat <- fitted(model5)
-plot(e_hat ~ y_hat, xlab="Fitted Values", ylab="Residuals")
-plot(e_hat ~ log(spotify$in_spotify_playlists), xlab="ln(AdPages)", ylab="Residuals")
-plot(e_hat ~ log(spotify$danceability_pct), xlab="ln(AdPages)", ylab="Residuals")
-plot(e_hat ~ log(spotify$energy_pct), xlab="ln(SubRevenue)", ylab="Residuals")
-plot(e_hat ~ sqrt(spotify$valence_pct), xlab="ln(NewsRevenue)", ylab="Residuals")
-plot(e_hat ~ 1/(spotify$artist_count), xlab="ln(NewsRevenue)", ylab="Residuals")
-plot(e_hat ~ log(spotify$released_year), xlab="ln(SubRevenue)", ylab="Residuals")
-plot(e_hat ~ log(spotify$danceability_pct * spotify$energy_pct), xlab="ln(SubRevenue)", ylab="Residuals")
-qqnorm(e_hat); qqline(e_hat)
-
-# Residual vs Fitted Plot — AFTER Fix
-resid_dat_after <- augment(lm(log(streams) ~ in_spotify_playlists + danceability_pct + energy_pct +
-           valence_pct + artist_count + released_year +
-           danceability_pct * energy_pct,
-         data = spotify))
-p_resid_fitted_after <- ggplot(resid_dat_after, aes(x = .fitted, y = .resid)) +
-  geom_point(alpha = 0.5) +
-  geom_hline(yintercept = 0, linetype = 2) +
-  labs(title = "Residuals vs Fitted (log-transformed model)",
-       x = "Fitted values",
-       y = "Residuals") +
-  theme_minimal()
-ggsave("figures/resid_vs_fitted_log.png", p_resid_fitted_after,
-       width = 6, height = 4, dpi = 300)
-
-# Residuals vs in_spotify_playlists (to check heteroskedasticity vs exposure)
-p_resid_spotifyPlaylists <- ggplot(resid_dat, aes(x = in_spotify_playlists, y = .resid)) +
-  geom_point(alpha = 0.5) +
-  geom_smooth(method = "loess", se = FALSE) +
-  labs(title = "Residuals vs In-Spotify-Playlists", x = "In Spotify playlists", y = "Residuals") +
-  theme_minimal()
-ggsave("figures/resid_vs_spotify_playlists_raw.png", p_resid_spotifyPlaylists, width = 6, height = 4, dpi = 300)
-
-# QQ-plot of residuals
-p_qq <- ggplot(resid_dat, aes(sample = .resid)) +
-  stat_qq() +
-  stat_qq_line() +
-  labs(title = "Normal Q-Q Plot of Residuals (raw model)") +
-  theme_minimal()
-ggsave("figures/qqplot_resid_raw.png", p_qq, width = 6, height = 4, dpi = 300)
-
-# Scale-Location plot (sqrt(|resid|)
-p_scale_loc <- ggplot(resid_dat, aes(x = .fitted, y = sqrt(abs(.resid)))) +
-  geom_point(alpha = 0.5) +
-  geom_smooth(method = "loess", se = FALSE) +
-  labs(title = "Scale-Location Plot", x = "Fitted values", y = "Sqrt(|Residuals|)") +
-  theme_minimal()
-ggsave("figures/scale_location_raw.png", p_scale_loc, width = 6, height = 4, dpi = 300)
-
-# ------------------ 11) Optional: Save model summaries and diagnostics to files ------------------
-capture.output(summary_raw, file = "figures/model_raw_summary.txt")
-capture.output(vif_df, file = "figures/vif_values.txt")
-capture.output(summary(model_log), file = "figures/model_log_summary.txt")
-
-# ------------------ 12) Notes for poster captions & interpretation (print a short summary) ------------------
-cat("\n\n=== Poster notes (copy into poster): ===\n")
-cat("- Model formula (raw):", deparse(formula_raw), "\n")
-cat("- Top results: inspect 'figures/coef_table_raw.csv' and 'figures/coef_estimates_raw.png'\n")
-cat("- Interaction plot saved to: figures/interaction_pred_streams_raw.png (raw) and figures/interaction_pred_streams_log_backtrans.png (log-model back-transformed)\n")
-cat("- Diagnostics saved to: figures/resid_vs_fitted_raw.png, figures/resid_vs_spotify_playlists_raw.png, figures/qqplot_resid_raw.png, figures/scale_location_raw.png\n")
-cat("- Consider reporting results from the log-model (figures/model_log_summary.txt) if heteroskedasticity present.\n")
+ggsave("figures/coef_plot_preferred_model.png", coef_plot, width = 7, height = 4, dpi = 300)
 ```
 
 Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
