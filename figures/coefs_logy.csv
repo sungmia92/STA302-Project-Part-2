@@ -1,0 +1,9 @@
+term,estimate,std.error,statistic,p.value,sig
+(Intercept),18.8692,5.9034,3.196,0.00144,**
+in_spotify_playlists,1e-4,0,22.827,3.4499999999999994e-92,***
+danceability_pct,-4e-4,0.007,-0.052,0.958,
+energy_pct,-0.0054,0.0071,-0.76,0.448,
+valence_pct,-8e-4,0.0014,-0.592,0.554,
+artist_count,-0.1221,0.0331,-3.686,2.41e-4,***
+released_year,3e-4,0.0029,0.095,0.924,
+danceability_pct:energy_pct,0,1e-4,0.425,0.671,

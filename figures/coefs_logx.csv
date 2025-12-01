@@ -1,0 +1,9 @@
+term,estimate,std.error,statistic,p.value,sig
+(Intercept),-36.3692,34.9479,-1.041,0.298,
+log_in_spotify_playlists,0.6865,0.0184,37.275,1.0499999999999997e-187,***
+log_danceability_pct,-31.9403,9.6198,-3.32,9.34e-4,***
+log_energy_pct,-32.2151,9.6466,-3.34,8.72e-4,***
+sqrt_valence_pct,0.0109,0.015,0.726,0.468,
+inv_artist_count,0.3088,0.0846,3.649,2.78e-4,***
+log_released_year,7.3616,4.5763,1.609,0.108,
+log_interaction,31.5077,9.4395,3.338,8.77e-4,***
