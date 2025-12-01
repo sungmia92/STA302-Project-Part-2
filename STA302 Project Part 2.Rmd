@@ -224,33 +224,41 @@ cat("LOOCV MSE (train):", loocv_mse, "\n")
 
 # ------------------ 13) Coefficient table for preferred model ------------------
 library(broom)
+library(readr)
+library(forcats)
+library(ggplot2)
 
-coef_table <- tidy(preferred_train) %>%
+# ------------------ Coefficient table for model_quad ------------------
+coef_table_quad <- broom::tidy(model_quad)  # tidy the model
+
+# Round numbers and select key columns
+coef_table_quad <- coef_table_quad %>%
   mutate(
     estimate = round(estimate, 3),
     std.error = round(std.error, 3),
     statistic = round(statistic, 3),
     p.value = signif(p.value, 3)
   ) %>%
-  select(term, estimate, std.error, statistic, p.value)
+  as.data.frame()  # make sure it's a clean data frame
 
-print(coef_table)
+# Print table
+print(coef_table_quad)
 
-# Optionally save to CSV
-write_csv(coef_table, "figures/coef_table_preferred_model.csv")
+# Save as CSV
+write_csv(coef_table_quad, "figures/coef_table_quad_model.csv")
 
-# Optional: coefficient plot (dot-and-whisker style)
-coef_plot <- coef_table %>%
+# Optional: coefficient plot (dot-and-whisker)
+coef_plot_quad <- coef_table_quad %>%
   filter(term != "(Intercept)") %>%
   mutate(term = fct_reorder(term, estimate)) %>%
   ggplot(aes(x = estimate, y = term)) +
   geom_point() +
   geom_errorbarh(aes(xmin = estimate - 1.96*std.error,
                      xmax = estimate + 1.96*std.error), height = 0.2) +
-  labs(title = "Coefficient Estimates with 95% CI", x = "Estimate", y = "") +
+  labs(title = "Coefficient Estimates (Quadratic Model)", x = "Estimate", y = "") +
   theme_minimal()
 
-ggsave("figures/coef_plot_preferred_model.png", coef_plot, width = 7, height = 4, dpi = 300)
+ggsave("figures/coef_plot_quad_model.png", coef_plot_quad, width = 7, height = 5, dpi = 300)
 ```
 
 Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
