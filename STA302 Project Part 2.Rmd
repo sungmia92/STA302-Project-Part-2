@@ -6,17 +6,10 @@ date: "2025-11-25"
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-# Required packages - install if missing
-pkgs <- c("tidyverse", "broom", "car", "ggplot2", "ggpubr", "sjPlot", "effects", "emmeans")
-install_if_missing <- function(p) {
-  if (!requireNamespace(p, quietly = TRUE)) install.packages(p)
-}
-invisible(lapply(pkgs, install_if_missing))
-library(tidyverse)
-library(broom)
-library(modelsummary)
-library(ggplot2)
-library(car)
+# ------------------ 0) Load libraries ------------------
+pkgs <- c("tidyverse", "broom", "car", "MASS", "lmtest", "sandwich", "caret", "Metrics", "ggplot2")
+invisible(lapply(pkgs, function(p) if(!requireNamespace(p, quietly = TRUE)) install.packages(p)))
+library(tidyverse); library(broom); library(car); library(MASS); library(lmtest); library(sandwich); library(caret); library(Metrics); library(ggplot2)
 ```
 
 ## R Markdown
@@ -27,31 +20,12 @@ When you click the **Knit** button a document will be generated that includes bo
 
 ```{r cars}
 # ------------------ 1) Load data ------------------
-# Replace path with your file path if needed
 spotify <- read_csv("spotify-2023.csv")
-# If you already have spotify loaded, skip the read_csv line above.
-
-# Example: uncomment and set your path
-# spotify <- read_csv("/Users/yourname/path/to/spotify-2023.csv")
-
-# Quick check
-if (!exists("spotify")) stop("Please load your dataset into the object `spotify` before running this script.")
 
 # ------------------ 2) Clean / rename columns ------------------
-# Change names that have '%' or other characters into safe R names
 spotify <- spotify %>%
-  rename_with(~ gsub("%", "pct", .x, fixed = TRUE)) %>%     # replace % with pct
-  rename_with(~ make.names(.x))                              # make syntactically valid names
-
-# Example: if your column names were "danceability_%" and "energy_%", they'll become "danceability_pct" and "energy_pct"
-# Confirm that important columns exist
-required_cols <- c("streams", "in_spotify_playlists", "danceability_pct", "energy_pct", "valence_pct",
-                   "artist_count", "released_year")
-missing_cols <- setdiff(required_cols, names(spotify))
-if (length(missing_cols) > 0) stop("Missing columns in dataset: ", paste(missing_cols, collapse = ", "))
-
-# Convert types
-spotify <- spotify %>%
+  rename_with(~ gsub("%", "pct", .x, fixed = TRUE)) %>%
+  rename_with(~ make.names(.x)) %>%
   mutate(
     streams = as.numeric(streams),
     in_spotify_playlists = as.numeric(in_spotify_playlists),
@@ -59,170 +33,114 @@ spotify <- spotify %>%
     energy_pct = as.numeric(energy_pct),
     valence_pct = as.numeric(valence_pct),
     artist_count = as.integer(artist_count),
-    released_year = as.integer(released_year),
-    # create factors if helpful for plotting (not used in model)
-    released_year_f = factor(released_year)
+    released_year = as.integer(released_year)
   ) %>%
   drop_na(streams, in_spotify_playlists, danceability_pct, energy_pct, valence_pct, artist_count, released_year)
 
-# ------------------ 3) Fit the exact specified model (raw streams) ------------------
-# ORIGINAL MODEL (before fixing heteroskedasticity)
-m0 <- lm(streams ~ in_spotify_playlists + danceability_pct + energy_pct +
-           valence_pct + artist_count + released_year +
-           danceability_pct * energy_pct,
-         data = spotify)
+# ------------------ 3) Fit raw model ------------------
+model_raw <- lm(streams ~ in_spotify_playlists + danceability_pct + energy_pct +
+                  valence_pct + artist_count + released_year +
+                  danceability_pct * energy_pct,
+                data = spotify)
+summary(model_raw)
 
-# Tidy summary
-summary_raw <- summary(model_raw)
-print(summary_raw)
-
-# Tidy coefficients table
-coefs_raw <- broom::tidy(model_raw) %>%
-  mutate(estimate = round(estimate, 2),
-         std.error = round(std.error, 2),
-         statistic = round(statistic, 2),
-         p.value = signif(p.value, 3))
-print(coefs_raw)
-
-# ------------------ 4) Multicollinearity check (VIF) ------------------
-vif_vals <- car::vif(model_raw)
-vif_df <- enframe(vif_vals, name = "term", value = "VIF")
-print(vif_df)
-
-# ------------------ 5) Optional: Fit log-transformed streams model for heteroskedasticity
-# (recommended for diagnostics; keep the raw model as primary since you asked for the exact formula)
-spotify <- spotify %>% mutate(log_streams = log1p(streams)) # log1p handles zeros safely
-formula_log <- as.formula("log_streams ~ in_spotify_playlists + danceability_pct + energy_pct + valence_pct + artist_count + released_year + danceability_pct:energy_pct")
-model_log <- lm(formula_log, data = spotify)
+# ------------------ 4) Fit log-transformed model (heteroskedasticity fix) ------------------
+spotify <- spotify %>% mutate(log_streams = log1p(streams))
+model_log <- lm(log_streams ~ in_spotify_playlists + danceability_pct + energy_pct +
+                  valence_pct + artist_count + released_year +
+                  danceability_pct * energy_pct,
+                data = spotify)
 summary(model_log)
 
-# ------------------ 6) Create figures directory ------------------
-if (!dir.exists("figures")) dir.create("figures")
+# ------------------ 5) Optionally add quadratic term to improve linearity ------------------
+model_quad <- lm(log_streams ~ in_spotify_playlists + I(in_spotify_playlists^2) +
+                   danceability_pct + I(danceability_pct^2) +
+                   energy_pct + I(energy_pct^2) +
+                   valence_pct + artist_count + released_year +
+                   danceability_pct * energy_pct,
+                 data = spotify)
+summary(model_quad)
 
-# ===== Packages needed =====
-pkgs2 <- c("lmtest", "sandwich", "MASS", "caret", "Metrics", "broom", "car")
-invisible(lapply(pkgs2, function(p) if (!requireNamespace(p, quietly = TRUE)) install.packages(p)))
-library(lmtest); library(sandwich); library(MASS); library(caret); library(Metrics); library(broom); library(car)
+# ------------------ 6) Residual diagnostics ------------------
+resid_before <- augment(model_raw)
+resid_after <- augment(model_log)
 
-# ----- A. Formal heteroskedasticity test (Breusch-Pagan) -----
-bp_test <- lmtest::bptest(model_raw)
-print(bp_test)
-# On poster: report bp_test$statistic and bp_test$p.value
+# Residual vs Fitted (Raw)
+p_resid_raw <- ggplot(resid_before, aes(x = .fitted, y = .resid)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  labs(title = "Residuals vs Fitted (Raw Model)", x = "Fitted values", y = "Residuals") +
+  theme_minimal()
+ggsave("figures/resid_vs_fitted_raw.png", p_resid_raw, width = 6, height = 4, dpi = 300)
 
-# ----- B. Try Box-Cox to see an optimal transform (applies to positive streams) -----
-# BoxCox requires strictly positive response: streams > 0
-if (all(spotify$streams > 0)) {
-  bc <- MASS::boxcox(model_raw, plotit = FALSE)
+# Residual vs Fitted (Log)
+p_resid_log <- ggplot(resid_after, aes(x = .fitted, y = .resid)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  labs(title = "Residuals vs Fitted (Log-Transformed Model)", x = "Fitted values", y = "Residuals") +
+  theme_minimal()
+ggsave("figures/resid_vs_fitted_log.png", p_resid_log, width = 6, height = 4, dpi = 300)
+
+# QQ Plots
+p_qq_raw <- ggplot(resid_before, aes(sample = .resid)) +
+  stat_qq() + stat_qq_line() +
+  labs(title = "QQ Plot of Residuals (Raw Model)") +
+  theme_minimal()
+ggsave("figures/qq_resid_raw.png", p_qq_raw, width = 6, height = 4, dpi = 300)
+
+p_qq_log <- ggplot(resid_after, aes(sample = .resid)) +
+  stat_qq() + stat_qq_line() +
+  labs(title = "QQ Plot of Residuals (Log-Transformed Model)") +
+  theme_minimal()
+ggsave("figures/qq_resid_log.png", p_qq_log, width = 6, height = 4, dpi = 300)
+
+# Scale-Location plots
+p_scale_raw <- ggplot(resid_before, aes(x = .fitted, y = sqrt(abs(.resid)))) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", se = FALSE) +
+  labs(title = "Scale-Location (Raw Model)", x = "Fitted values", y = "Sqrt(|Residuals|)") +
+  theme_minimal()
+ggsave("figures/scale_location_raw.png", p_scale_raw, width = 6, height = 4, dpi = 300)
+
+p_scale_log <- ggplot(resid_after, aes(x = .fitted, y = sqrt(abs(.resid)))) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", se = FALSE) +
+  labs(title = "Scale-Location (Log Model)", x = "Fitted values", y = "Sqrt(|Residuals|)") +
+  theme_minimal()
+ggsave("figures/scale_location_log.png", p_scale_log, width = 6, height = 4, dpi = 300)
+
+# ------------------ 7) Optional: Box-Cox ------------------
+if(all(spotify$streams > 0)) {
+  bc <- boxcox(model_raw, lambda = seq(-1, 2, 0.05), plotit = FALSE)
   lambda_opt <- bc$x[which.max(bc$y)]
   cat("Box-Cox suggested lambda =", lambda_opt, "\n")
-} else {
-  cat("Box-Cox skipped (non-positive streams present). Consider log1p instead.\n")
 }
 
-# ----- C. Refit using log1p(streams) if heteroskedasticity present -----
-spotify$log_streams <- log1p(spotify$streams)
-model_log <- lm(log_streams ~ in_spotify_playlists + danceability_pct + energy_pct + valence_pct + artist_count + released_year + danceability_pct:energy_pct, data = spotify)
-summary(model_log)
-# Diagnostics for log model
-bp_log <- lmtest::bptest(model_log)
-print(bp_log)
-
-# ----- D. Robust (HC) standard errors for raw model coefficients -----
-coeftest_raw_HC <- lmtest::coeftest(model_raw, vcov = sandwich::vcovHC(model_raw, type = "HC3"))
-print(coeftest_raw_HC)
-# On poster: show coefficients with robust SEs and robust p-values
-
-# ----- E. Weighted Least Squares (WLS) approach -----
-# 1. Fit model, compute squared residuals, regress squared residuals on fitted values to estimate variance function
-resid_sq <- residuals(model_raw)^2
-fit_vals <- fitted(model_raw)
-wmodel_var <- lm(resid_sq ~ fit_vals)
-# predicted variance (avoid zeros)
-pred_var <- pmax(predict(wmodel_var), 1e-6)
-weights <- 1 / pred_var
-# 2. Refit with weights
-model_wls <- lm(formula(model_raw), data = spotify, weights = weights)
-summary(model_wls)
-# Diagnostics
-bp_wls <- lmtest::bptest(model_wls)
-print(bp_wls)
-
-# ----- F. Influence diagnostics (leverage & Cook's distance) -----
-inf <- influence.measures(model_raw)
-# identify high leverage or high Cook's distance
-cd <- cooks.distance(model_raw)
-high_cd <- which(cd > (4 / nrow(spotify)))  # conventional rule
-length(high_cd)
-# Optionally inspect top influential points
-top_inf <- head(order(cd, decreasing = TRUE), 10)
-data.frame(row = top_inf, cooks_d = round(cd[top_inf], 4))
-
-# ----- G. Multicollinearity check (VIF) -----
-vifs <- car::vif(model_raw)
-print(vifs)
-
-# ----- H. k-fold cross-validation (5-fold) to compare raw vs log vs WLS model predictive RMSE -----
-set.seed(2025)
-k <- 5
-# Use caret::train for consistent CV. Create custom training function for raw (predicting streams)
-ctrl <- caret::trainControl(method = "cv", number = k)
-
-# raw model formula
-form_raw <- formula(model_raw)
-# caret requires a method; use "lm"
-cv_raw <- caret::train(form_raw, data = spotify, method = "lm", trControl = ctrl)
-cv_raw$results  # RMSE on original scale (caret uses resampling on response scale)
-
-# log model CV (predict log_streams)
-form_log <- formula(model_log)
-cv_log <- caret::train(form_log, data = spotify, method = "lm", trControl = ctrl)
-cv_log$results
-
-# For WLS, caret doesn't directly support weights in train; do manual CV for WLS RMSE:
-folds <- caret::createFolds(spotify$streams, k = k)
-rmse_wls_folds <- sapply(folds, function(idx_test){
-  test <- spotify[idx_test, ]
-  train <- spotify[-idx_test, ]
-  m_train <- lm(streams ~ in_spotify_playlists + danceability_pct + energy_pct + valence_pct + artist_count + released_year + danceability_pct:energy_pct, data = train)
-  # estimate variance function on train
-  pred_train <- predict(m_train)
-  res_sq_train <- residuals(m_train)^2
-  vfit <- lm(res_sq_train ~ pred_train)
-  pred_var_train <- pmax(predict(vfit, newdata = data.frame(pred_train = predict(m_train, newdata = test))), 1e-6)
-  wts_test <- 1 / pred_var_train
-  m_wls_test <- lm(formula(m_train), data = train, weights = 1 / pmax(predict(vfit), 1e-6))
-  # predict on test
-  pred_test <- predict(m_wls_test, newdata = test)
-  Metrics::rmse(test$streams, pred_test)
-})
-mean_rmse_wls <- mean(rmse_wls_folds)
-cat("WLS CV RMSE (approx):", mean_rmse_wls, "\n")
-
-# ----- I. Model performance summary (Adj R^2, RMSE, MAE) for raw/log/WLS -----
-# Raw:
-adj_r2_raw <- summary(model_raw)$adj.r.squared
-rmse_raw <- Metrics::rmse(spotify$streams, predict(model_raw))
-mae_raw <- Metrics::mae(spotify$streams, predict(model_raw))
-# Log (on log scale)
-adj_r2_log <- summary(model_log)$adj.r.squared
-rmse_log <- Metrics::rmse(spotify$log_streams, predict(model_log))
-mae_log <- Metrics::mae(spotify$log_streams, predict(model_log))
-# WLS:
-adj_r2_wls <- summary(model_wls)$adj.r.squared
-rmse_wls <- Metrics::rmse(spotify$streams, predict(model_wls))
-mae_wls <- Metrics::mae(spotify$streams, predict(model_wls))
-
-perf_table <- tibble(
-  Model = c("Raw (OLS)", "Log(1+streams)", "WLS (resid var)"),
-  Adj_R2 = c(adj_r2_raw, adj_r2_log, adj_r2_wls),
-  RMSE = c(rmse_raw, rmse_log, rmse_wls),
-  MAE = c(mae_raw, mae_log, mae_wls)
+# ------------------ 8) Interaction plot ------------------
+dance_seq <- seq(min(spotify$danceability_pct), max(spotify$danceability_pct), length.out = 100)
+energy_quants <- quantile(spotify$energy_pct, c(0.25, 0.5, 0.75))
+newdata <- expand.grid(
+  in_spotify_playlists = median(spotify$in_spotify_playlists),
+  danceability_pct = dance_seq,
+  energy_pct = energy_quants,
+  valence_pct = median(spotify$valence_pct),
+  artist_count = round(median(spotify$artist_count)),
+  released_year = round(median(spotify$released_year))
 )
-print(perf_table)
-# Save table for poster
-if (!dir.exists("figures")) dir.create("figures")
-write_csv(perf_table, "figures/model_performance_comparison.csv")
-```
+newdata$pred <- predict(model_log, newdata = newdata)
+newdata <- newdata %>%
+  mutate(energy_level = factor(case_when(
+    energy_pct == energy_quants[1] ~ "Low (25th pctile)",
+    energy_pct == energy_quants[2] ~ "Median (50th pctile)",
+    energy_pct == energy_quants[3] ~ "High (75th pctile)"
+  ), levels = c("Low (25th pctile)", "Median (50th pctile)", "High (75th pctile)")))
+
+p_interaction <- ggplot(newdata, aes(x = danceability_pct, y = expm1(pred), color = energy_level)) +
+  geom_line(size = 1) +
+  labs(title = "Interaction: Predicted Streams by Danceability across Energy Levels",
+       x = "Danceability (%)", y = "Predicted Streams", color = "Energy Level") +
+  theme_minimal()
+ggsave("figures/interaction_pred_streams_log_backtrans.png", p_interaction, width = 7, height = 4, dpi = 300)
 
 ## Including Plots
 
@@ -334,8 +252,9 @@ p_resid_fitted <- ggplot(resid_dat, aes(x = .fitted, y = .resid)) +
   theme_minimal()
 ggsave("figures/resid_vs_fitted_raw.png", p_resid_fitted, width = 6, height = 4, dpi = 300)
 
-transStreams <- (spotify$streams)^0.2
-model2 <- lm(transStreams ~ in_spotify_playlists + danceability_pct + energy_pct +
+# Residual vs Fitted Plot - TRY LOG ON Y
+lnStreams <- log(spotify$streams)
+model2 <- lm(lnStreams ~ in_spotify_playlists + danceability_pct + energy_pct +
            valence_pct + artist_count + released_year +
            danceability_pct * energy_pct,
          data = spotify)
@@ -348,14 +267,49 @@ p_resid_fitted <- ggplot(spotify, aes(x = e_hat, y = y_hat)) +
   theme_minimal()
 ggsave("figures/resid_vs_fitted_transformed.png", p_resid_fitted, width = 6, height = 4, dpi = 300)
 
-p <- powerTransform(cbind(resid_dat[,2:6]))
-summary(p)
-model3 <- lm(transStreams ~ log(in_spotify_playlists) + log(danceability_pct) + log(energy_pct) +
-           sqrt(valence_pct) + 1/artist_count + log(released_year) +
-           log(danceability_pct * energy_pct),
+# Residual vs Fitted Plot - BOX-COX ON Y
+powerTransform(model1)
+transStreams <- (spotify$streams)^0.2
+model3 <- lm(transStreams ~ in_spotify_playlists + danceability_pct + energy_pct +
+           valence_pct + artist_count + released_year +
+           danceability_pct * energy_pct,
          data = spotify)
 e_hat <- resid(model3)
 y_hat <- fitted(model3)
+p_resid_fitted <- ggplot(spotify, aes(x = e_hat, y = y_hat)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  labs(title = "Residuals vs Fitted (transformed model)", x = "Fitted values", y = "Residuals") +
+  theme_minimal()
+ggsave("figures/resid_vs_fitted_transformed.png", p_resid_fitted, width = 6, height = 4, dpi = 300)
+
+# Residual vs Fitted Plot - BOX-COX ON X
+p <- powerTransform(cbind(resid_dat[,2:6]))
+summary(p)
+model4 <- lm(streams ~ log(in_spotify_playlists) + log(danceability_pct) + log(energy_pct) +
+           sqrt(valence_pct) + 1/artist_count + log(released_year) +
+           log(danceability_pct * energy_pct),
+         data = spotify)
+e_hat <- resid(model4)
+y_hat <- fitted(model4)
+plot(e_hat ~ y_hat, xlab="Fitted Values", ylab="Residuals")
+plot(e_hat ~ log(spotify$in_spotify_playlists), xlab="ln(in_spotify_playlists)", ylab="Residuals")
+plot(e_hat ~ log(spotify$danceability_pct), xlab="ln(AdPages)", ylab="Residuals")
+plot(e_hat ~ log(spotify$energy_pct), xlab="ln(SubRevenue)", ylab="Residuals")
+plot(e_hat ~ sqrt(spotify$valence_pct), xlab="ln(NewsRevenue)", ylab="Residuals")
+plot(e_hat ~ 1/(spotify$artist_count), xlab="ln(NewsRevenue)", ylab="Residuals")
+plot(e_hat ~ log(spotify$released_year), xlab="ln(SubRevenue)", ylab="Residuals")
+plot(e_hat ~ log(spotify$danceability_pct * spotify$energy_pct), xlab="ln(SubRevenue)", ylab="Residuals")
+qqnorm(e_hat); qqline(e_hat)
+
+p <- powerTransform(cbind(resid_dat[,1:6]))
+summary(p)
+model5 <- lm(transStreams ~ log(in_spotify_playlists) + log(danceability_pct) + log(energy_pct) +
+           sqrt(valence_pct) + 1/artist_count + log(released_year) +
+           log(danceability_pct * energy_pct),
+         data = spotify)
+e_hat <- resid(model5)
+y_hat <- fitted(model5)
 plot(e_hat ~ y_hat, xlab="Fitted Values", ylab="Residuals")
 plot(e_hat ~ log(spotify$in_spotify_playlists), xlab="ln(AdPages)", ylab="Residuals")
 plot(e_hat ~ log(spotify$danceability_pct), xlab="ln(AdPages)", ylab="Residuals")
